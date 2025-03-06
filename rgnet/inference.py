@@ -423,7 +423,7 @@ def eval_epoch(model, eval_inter_window_dataset, eval_intra_window_dataset, opt,
                     )
         # performance evaluation
         if opt.eval_split_name in ["val"]:
-            with open("data/ego4d_ori_data/nlq_val.json") as file_id:
+            with open("data/ego4d_nlq_data_for_cone/data/ego4d_ori_data/nlq_val.json") as file_id:
                 ground_truth = json.load(file_id)
             thresholds = [0.3, 0.5]
             topK = [1, 5, 10, 50, 100]

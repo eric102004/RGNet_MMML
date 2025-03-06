@@ -2,17 +2,19 @@
 Utility: extract textual token feature for Ego4d-NLQ
 """
 import torch
+
+from run_on_video.egovlp_extrator import EgovlpFeatureExtractor
 from utils.basic_utils import load_jsonl
 import numpy as np
 import tqdm
 import msgpack
 import io
-from feature_extraction.clip_extractor import ClipFeatureExtractor
 from torch.utils.data import DataLoader, Dataset
 import argparse
 import os
 #import clip
 #from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
+
 #_tokenizer = _Tokenizer()
 
 
@@ -54,16 +56,15 @@ def pad_collate(data):
         for d in data:
             if k in d:
                 batch[k].append(d[k])
-            else:
-                batch[k].append(None)
-        #batch[k] = [d[k] for d in data if k in d else None]
+        #batch[k] = [d[k] for d in data]
     return batch
 
 
 def extract_ego4d_text_feature(args):
+    #format = "/s1_md0/leiji/v-zhijian/CONE/data/ego4d_data/%s.jsonl"
     #format = "data/ego4d_nlq_data_for_cone/data/ego4d_naq_data/%s.jsonl"
     format = "data/ego4d_nlq_data_for_cone/data/ego4d_data/%s.jsonl"
-    feature_output_path ='data/ego4d_nlq_data_for_cone/offline_lmdb/clip_naq_token'
+    feature_output_path = "data/ego4d_nlq_data_for_cone/offline_lmdb/egovlp_naq_cls"
     split_list = ['train', 'test', 'val']
     total_data = []
     for split in split_list:
@@ -73,11 +74,8 @@ def extract_ego4d_text_feature(args):
     print(len(total_data))
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Build models...")
-    clip_model_name_or_path = "ViT-B/32"
-    feature_extractor = ClipFeatureExtractor(
-        framerate=30, size=224, centercrop=True,
-        model_name_or_path=clip_model_name_or_path, device=device
-    )
+    extractor_ckpt_path = 'data/ego4d_naq/egovlp.pth'
+    feature_extractor = EgovlpFeatureExtractor(extractor_ckpt_path,device=device)
 
     dataset = SingleSentenceDataset(input_datalist=total_data)
 
@@ -91,7 +89,7 @@ def extract_ego4d_text_feature(args):
         token_features, text_eot_features = feature_extractor.encode_text(query_list)
 
         for i in range(len(query_list)):
-            token_feat = np.array(token_features[i].detach().cpu()).astype(np.float32)
+            token_feat = np.array(text_eot_features[i].detach().cpu()).astype(np.float32)
             # if i == 0:
             #     print("query: ", query_list[i])
             #     print("query tokenize 1: ", _tokenizer.bpe(query_list[i]))

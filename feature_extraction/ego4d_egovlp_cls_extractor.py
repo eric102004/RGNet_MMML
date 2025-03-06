@@ -12,10 +12,10 @@ import io
 from torch.utils.data import DataLoader, Dataset
 import argparse
 import os
-import clip
-from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
+#import clip
+#from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
 
-_tokenizer = _Tokenizer()
+#_tokenizer = _Tokenizer()
 
 
 def dumps_msgpack(dump):
@@ -52,15 +52,22 @@ class SingleSentenceDataset(Dataset):
 def pad_collate(data):
     batch = {}
     for k in data[0].keys():
-        batch[k] = [d[k] for d in data]
+        batch[k] = []
+        for d in data:
+            if k in d:
+                batch[k].append(d[k])
+            else:
+                batch[k].append(None)
+        #batch[k] = [d[k] for d in data]
     return batch
 
 
 def extract_ego4d_text_feature(args):
     #format = "/s1_md0/leiji/v-zhijian/CONE/data/ego4d_data/%s.jsonl"
-    format = "data/ego4d_nlq_data_for_cone/data/ego4d_naq_data/%s.jsonl"
+    #format = "data/ego4d_nlq_data_for_cone/data/ego4d_naq_data/%s.jsonl"
+    format = "data/ego4d_nlq_data_for_cone/data/ego4d_data/%s.jsonl"
     feature_output_path = "data/ego4d_nlq_data_for_cone/offline_lmdb/egovlp_naq_cls"
-    split_list = ['train']  # ['train', 'test', 'val']
+    split_list = ['train', 'test', 'val']
     total_data = []
     for split in split_list:
         filename = format % split

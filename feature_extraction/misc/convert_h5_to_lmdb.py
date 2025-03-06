@@ -23,11 +23,12 @@ def dumps_npz(dump, compress=False):
         return writer.getvalue()
 
 
-root = "data/mad_dataset" # Your downloaded feature root
+root = "../../mad/MAD/downloads/features/" # Your downloaded feature root
 #filenames = ["CLIP_frames_features_5fps"]  # "CLIP_language_tokens_features", "CLIP_language_features_MAD_test"
 #file = "CLIP_frames_features_5fps"
-filenames = ['CLIP_B32_frames_features_5fps',
-             'CLIP_L14_frames_features_5fps',]
+#filenames = ['CLIP_B32_frames_features_5fps',
+#             'CLIP_L14_frames_features_5fps',]
+filenames = ['CLIP_L14_frames_features_5fps',]
 # filenames = ['CLIP_B32_language_tokens_features',
 #             'CLIP_L14_language_tokens_features',
 #             'CLIP_B32_language_features_MAD_test',]
