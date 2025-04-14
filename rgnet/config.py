@@ -196,13 +196,16 @@ class BaseOptions(object):
         self.parser = parser
 
     def display_save(self, opt):
+        opt.device = opt.device.type
         args = vars(opt)
         # Display settings
         print(dict_to_markdown(vars(opt), max_str_len=120))
         # Save settings
-        if not isinstance(self, TestOptions):
-            option_file_path = os.path.join(opt.results_dir, self.saved_option_filename)  # not yaml file indeed
-            save_json(args, option_file_path, save_pretty=True)
+        #if not isinstance(self, TestOptions):
+        option_file_path = os.path.join(opt.results_dir, self.saved_option_filename)  # not yaml file indeed
+        os.makedirs(opt.results_dir, exist_ok=True)
+        save_json(args, option_file_path, save_pretty=True)
+        opt.device = torch.device(opt.device)
 
     def parse(self):
         if not self.initialized:
@@ -222,7 +225,7 @@ class BaseOptions(object):
                 if arg not in ["eval_path", "eval_split_name", "results_root",
                                "num_workers", "nms_thd", "debug", "save_all", "max_before_nms", "max_after_nms",
                                "max_pred_l", "min_pred_l", "eval_bsz", "data_ratio", "topk_window",
-                               "resume", "resume_all", "no_sort_results"]:
+                               "resume", "resume_all", "no_sort_results", "online_loader", "topk_span"]:
                     setattr(opt, arg, saved_options[arg])
             if opt.eval_results_dir is not None:
                 opt.results_dir = opt.eval_results_dir

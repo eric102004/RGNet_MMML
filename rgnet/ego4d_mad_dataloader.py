@@ -166,13 +166,13 @@ class StartEndDataset(Dataset):
         if self.online_loader and _meta["clip_id"] not in self.videofeat:
             self.videofeat[_meta["clip_id"]] = self._get_video_appearance_feat_by_vid(_meta["clip_id"])
         video_clip_feat = self.videofeat[_meta["clip_id"]]
+        #video_clip_feat = video_clip_feat[::self.input_fps_reduction]
         if self.same_visual_path:
             video_motion_feat = video_clip_feat
         else:
             video_motion_feat = self.motion_videofeat[_meta["clip_id"]]
             #video_motion_feat = self._get_video_motion_feat_by_vid(_meta["clip_id"])
-        video_clip_feat = video_clip_feat[::self.input_fps_reduction]
-        video_motion_feat = video_motion_feat[::self.input_fps_reduction]
+        #video_motion_feat = video_motion_feat[::self.input_fps_reduction]
         ctx_l = len(video_clip_feat)
         assert ctx_l > 0, ctx_l
         num_window = math.ceil(ctx_l / self.slide_window_size) + 1
@@ -345,6 +345,7 @@ class StartEndDataset(Dataset):
 
         if self.normalize_v:
             _v_feat = l2_normalize_np_array(v_feat)
+        v_feat = v_feat[::self.input_fps_reduction]
         return torch.from_numpy(v_feat)  # (Lv, D)
 
 

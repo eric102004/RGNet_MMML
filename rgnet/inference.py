@@ -15,7 +15,7 @@ from rgnet.config import TestOptions
 from rgnet.model import build_model
 from rgnet.span_utils import span_cxw_to_xx
 from rgnet.ego4d_mad_dataloader import prepare_batch_inputs, StartEndDataset, start_end_collate, PreFilteringDataset
-from utils.basic_utils import save_jsonl, normalize_score, load_jsonl, AverageMeter
+from utils.basic_utils import save_jsonl, normalize_score, load_jsonl, AverageMeter, save_json
 from utils.sampler import DistributedEvalSampler
 from utils.temporal_nms import temporal_nms
 import standalone_eval.evaluate_pre_filtered_window as window_eval
@@ -30,7 +30,7 @@ logging.basicConfig(format="%(asctime)s.%(msecs)03d:%(levelname)s:%(name)s - %(m
 
 
 @torch.no_grad()
-def compute_mr_results(model, eval_loader, opt, epoch_i=None, criterion=None, tb_writer=None,query_id2windowidx_old=None, query_id2windowscore=None):
+def compute_mr_results(model, eval_loader, opt, epoch_i=None, criterion=None, tb_writer=None, query_id2windowidx_old=None, query_id2windowscore=None):
     model.eval()
     if criterion:
         assert eval_loader.dataset.load_labels
@@ -50,6 +50,7 @@ def compute_mr_results(model, eval_loader, opt, epoch_i=None, criterion=None, tb
         iterator = tqdm(eval_loader, desc="compute st ed scores")
     else:
         iterator = eval_loader
+    
     for batch in iterator:
         query_meta = batch[0]
         model_inputs, model_clip_inputs, _, targets = prepare_batch_inputs(batch[1], batch[2], opt.device,non_blocking=opt.pin_memory)
@@ -68,7 +69,10 @@ def compute_mr_results(model, eval_loader, opt, epoch_i=None, criterion=None, tb
                         score *= torch.tensor(query_id2windowscore[q]).to(outputs['prob_soft'])
                     score, indices = torch.sort(score, descending=True)
                     indices = indices.tolist()
-                query_id2windowidx[q] = indices
+                query_id2windowidx[q] = indices                   # save 1
+                # save indices to query_id2windowidx/{q}.json
+                with open(f"{opt.results_dir}/query_id2windowidx/{q}.json", "w") as f:
+                    json.dump(indices, f, indent=4)
                 original_index = [all_window_index[i] for i in indices]
                 topk.extend(original_index[:opt.topk_window])
             for k,v in outputs.items():
@@ -119,6 +123,7 @@ def compute_mr_results(model, eval_loader, opt, epoch_i=None, criterion=None, tb
             pred_spans *= opt.clip_length
 
         # compose predictions
+        mr_res_sub = []
         for idx, (meta, spans, score, matching_score) in enumerate(
                 zip(query_meta, pred_spans.cpu(), scores.cpu(), matching_scores.cpu())):
 
@@ -140,16 +145,65 @@ def compute_mr_results(model, eval_loader, opt, epoch_i=None, criterion=None, tb
                 query=meta["query"],
                 video_id=meta["video_id"],
                 clip_id=meta["clip_id"],
-                saliency_scores=outputs['saliency_scores'][idx].cpu().numpy().tolist(),
+                #saliency_scores=outputs['saliency_scores'][idx].cpu().numpy().tolist(),
                 window_score = outputs['prob_soft'].cpu().numpy().tolist(),
                 gt_window = gt_windows[querie_ids[idx]],
                 pred_relevant_windows=cur_ranked_preds,
             )
-            mr_res.append(cur_query_pred)
+            # save cur_query_pred to cur_query_pred/{query_id}.json
+            mr_res_sub.append(cur_query_pred)
+        
+        with open(f"{opt.results_dir}/cur_query_pred/{meta['query_id']}.json", "w") as f:
+            json.dump(mr_res_sub, f, indent=4)
+        #mr_res.extend(mr_res_sub)
 
         #if opt.debug:
             #break
+    
+    # load mr_res and query_id2windowidx from file
+    #breakpoint()
+    mr_res = []
+    for file in tqdm(sorted(os.listdir(f"{opt.results_dir}/cur_query_pred"))):
+        with open(f"{opt.results_dir}/cur_query_pred/{file}", "r") as f:
+            mr_res.extend(json.load(f))
+    query_id2windowidx = {}
+    for file in tqdm(sorted(os.listdir(f"{opt.results_dir}/query_id2windowidx"))):
+        with open(f"{opt.results_dir}/query_id2windowidx/{file}", "r") as f:
+            query_id2windowidx[file.split(".")[0]] = json.load(f)
+    #breakpoint()
+    
     torch.cuda.empty_cache()
+    if opt.distributed:
+        torch.distributed.barrier()
+        # gather picked object from all gpus
+        mr_res = util.all_gather(mr_res)
+        mr_res = [feat for sub_feat in mr_res for feat in sub_feat]
+    if opt.ret_eval:
+        query_id2windowidx = util.all_gather(query_id2windowidx)
+        query_id2windowidx = {k:v for sub_feat in query_id2windowidx for k,v in sub_feat.items()}
+    if write_tb and criterion and util.is_main_process():
+        for k, v in loss_meters.items():
+            tb_writer.add_scalar("Eval/{}".format(k), v.avg, epoch_i + 1)
+
+    return mr_res, loss_meters, query_id2windowidx
+
+def load_mr_results(model, eval_loader, opt, epoch_i=None, criterion=None, tb_writer=None, query_id2windowidx_old=None, query_id2windowscore=None):
+    print("load mr results")
+    loss_meters = defaultdict(AverageMeter)
+    write_tb = tb_writer is not None and epoch_i is not None
+    
+    mr_res = []
+    split_num = opt.eval_id.split("_")[1]
+    for file in tqdm(sorted(os.listdir(f"{opt.results_dir}/cur_query_pred_{split_num}"))):
+        with open(f"{opt.results_dir}/cur_query_pred_{split_num}/{file}", "r") as f:
+            mr_res.extend(json.load(f))
+    query_id2windowidx = {}
+    for file in tqdm(sorted(os.listdir(f"{opt.results_dir}/query_id2windowidx_{split_num}"))):
+        with open(f"{opt.results_dir}/query_id2windowidx_{split_num}/{file}", "r") as f:
+            query_id2windowidx[file.split(".")[0]] = json.load(f)
+    #breakpoint()
+    
+    #torch.cuda.empty_cache()
     if opt.distributed:
         torch.distributed.barrier()
         # gather picked object from all gpus
@@ -310,7 +364,10 @@ def eval_epoch(model, eval_inter_window_dataset, eval_intra_window_dataset, opt,
                              sampler=eval_sampler,
                              pin_memory=opt.pin_memory)
 
-    submission, eval_loss_meters, query_id2windowidx = compute_mr_results(model, eval_loader, opt, epoch_i, criterion, tb_writer, query_id2windowidx, query_id2windowscore)
+    model = None
+    eval_laoder = None
+    submission, eval_loss_meters, query_id2windowidx = load_mr_results(model, eval_loader, opt, epoch_i, criterion, tb_writer, query_id2windowidx, query_id2windowscore)
+    #submission, eval_loss_meters, query_id2windowidx = compute_mr_results(model, eval_loader, opt, epoch_i, criterion, tb_writer, query_id2windowidx, query_id2windowscore)
 
     if util.is_main_process():
         print("total model running time: ", time.time() - start_time)
@@ -337,7 +394,7 @@ def eval_epoch(model, eval_inter_window_dataset, eval_intra_window_dataset, opt,
 
             # window pre-filtering recall
             window_ranklist_results = window_eval.windows_selection(
-                query_id2windowidx, ground_truth, torch.tensor([1, 5, 10, 30, 50, 100, 200]), opt
+                query_id2windowidx, ground_truth, torch.tensor([1, 5, 10, 30, 50, 100, 200]), opt, match_number=False,
             )
             title = f"Window Pre-filtering Epoch {epoch_i}"
             window_score_str, pre_data = window_eval.display_window_results(
@@ -347,46 +404,85 @@ def eval_epoch(model, eval_inter_window_dataset, eval_intra_window_dataset, opt,
                 print(window_score_str, flush=True)
 
             # Score fusion between two proposal and matching scores
-            results = mad_eval.evaluate_nlq_performance(
-                submission, ground_truth, thresholds, topK
+            results, average_iou, ndcg, results_sample = mad_eval.evaluate_nlq_performance(
+                submission, ground_truth, thresholds, topK, match_number=False,
             )
             title = f"Fusion Epoch {epoch_i}"
             score_str, fusion_data = mad_eval.display_results(
                 results, thresholds, topK, title=title
             )
-            if util.is_main_process():
+            average_iou_str, _ = mad_eval.display_average_iou_or_ndcg(
+                average_iou, topK, "aIoU", title=title
+            )
+            ndcg_str, _ = mad_eval.display_average_iou_or_ndcg(
+                ndcg, topK, "nDCG", title=title
+            )
+            if 1 or util.is_main_process():
                 print(score_str, flush=True)
+                print(average_iou_str, flush=True)
+                print(ndcg_str, flush=True)
 
             # Proposal score
-            results_proposal = mad_eval.evaluate_nlq_performance(
-                submission_proposal, ground_truth, thresholds, topK
+            results_proposal, average_iou_proposal, ndcg_proposal, results_proposal_sample = mad_eval.evaluate_nlq_performance(
+                submission_proposal, ground_truth, thresholds, topK, match_number=False,
             )
             title = f"Proposal Epoch {epoch_i}"
             score_str_proposal, proposal_data = mad_eval.display_results(
                 results_proposal, thresholds, topK, title=title
             )
-            if util.is_main_process():
+            average_iou_str_proposal, _ = mad_eval.display_average_iou_or_ndcg(
+                average_iou_proposal, topK, "aIoU", title=title
+            )
+            ndcg_str_proposal, _ = mad_eval.display_average_iou_or_ndcg(
+                ndcg_proposal, topK, "nDCG", title=title
+            )
+            if 1 or util.is_main_process():
                 print(score_str_proposal, flush=True)
+                print(average_iou_str_proposal, flush=True)
+                print(ndcg_str_proposal, flush=True)
 
             # Matching score
-            results_matching = mad_eval.evaluate_nlq_performance(
-                submission_matching, ground_truth, thresholds, topK
+            results_matching, average_iou_matching, ndcg_matching, results_matching_sample = mad_eval.evaluate_nlq_performance(
+                submission_matching, ground_truth, thresholds, topK, match_number=False,
             )
             title = f"Matching Epoch {epoch_i}"
             score_str_matching, matching_data = mad_eval.display_results(
                 results_matching, thresholds, topK, title=title
             )
+            average_iou_str_matching, _ = mad_eval.display_average_iou_or_ndcg(
+                average_iou_matching, topK, "aIoU", title=title
+            )
+            ndcg_str_matching, _ = mad_eval.display_average_iou_or_ndcg(
+                ndcg_matching, topK, "nDCG", title=title
+            )
             save_metrics_path = submission_path.replace(".jsonl", ".txt")
-            if util.is_main_process():
+            if 1 or util.is_main_process():
                 print(score_str_matching, flush=True)
+                print(average_iou_str_matching, flush=True)
+                print(ndcg_str_matching, flush=True)
                 with open(save_metrics_path, mode="w", encoding="utf-8") as score_writer:
-                    score_writer.write(window_score_str)
-                    score_writer.write(score_str)
-                    score_writer.write(score_str_proposal)
-                    score_writer.write(score_str_matching)
+                    score_writer.write(window_score_str+"\n\n")
+                    score_writer.write(score_str+"\n\n")
+                    score_writer.write(average_iou_str+"\n\n")
+                    score_writer.write(ndcg_str+"\n\n")
+                    score_writer.write(score_str_proposal+"\n\n")
+                    score_writer.write(average_iou_str_proposal+"\n\n")
+                    score_writer.write(ndcg_str_proposal+"\n\n")
+                    score_writer.write(score_str_matching+"\n\n")
+                    score_writer.write(average_iou_str_matching+"\n\n")
+                    score_writer.write(ndcg_str_matching+"\n\n")
                     score_writer.flush()
 
             latest_file_paths.append(save_metrics_path)
+
+            # save sample results
+            #save_sample_path_fusion = submission_path.replace(".jsonl", "_sample_fusion.jsonl")
+            #save_smaple_path_proposal = submission_path.replace(".jsonl", "_sample_proposal.jsonl")
+            #save_sample_path_matching = submission_path.replace(".jsonl", "_sample_matching.jsonl")
+            #save_json(results_sample, save_sample_path_fusion, save_pretty=True, sort_keys=False)
+            #save_json(results_proposal_sample, save_smaple_path_proposal, save_pretty=True, sort_keys=False)
+            #save_json(results_matching_sample, save_sample_path_matching, save_pretty=True, sort_keys=False)
+            
 
     if opt.dset_name == "ego4d":
         # Post-processing for Ego4d-NLQ dataset
@@ -515,7 +611,7 @@ def eval_epoch(model, eval_inter_window_dataset, eval_intra_window_dataset, opt,
 def inter_window_pre_filtering(eval_inter_window_dataset, eval_intra_window_dataset, model, opt, query_id2windowidx,
                                query_id2windowscore):
     eval_inter_window_dataset.set_data_mode("context")
-    eval_sampler = DistributedEvalSampler(dataset=eval_inter_window_dataset, shuffle=False) if opt.distributed else None
+    eval_sampler = DistributedEvalSampler(dataset=eval_inter_window_dataset, shuffle=False) if opt.distributed else Nones
     eval_inter_window_context_loader = DataLoader(
         eval_inter_window_dataset,
         batch_size=1,
@@ -652,6 +748,7 @@ def start_inference():
     if util.is_main_process():
         logger.info("Setup config, data and model...")
     opt = TestOptions().parse()
+    TestOptions().display_save(opt)
     opt.results_dir = opt.model_dir
     cudnn.benchmark = True
     cudnn.deterministic = False
@@ -662,11 +759,12 @@ def start_inference():
     if util.is_main_process():
         logger.info(opt)
     # Setup Dataset
+    eval_intra_window_dataset = create_eval_intra_window_dataset(opt)
     model, model_without_ddp, criterion, _, _ = setup_model(opt)
     eval_inter_window_dataset=None
     if not opt.ret_eval or opt.comb_ret_eval:
         eval_inter_window_dataset = create_eval_inter_window_dataset(opt)
-    eval_intra_window_dataset = create_eval_intra_window_dataset(opt)
+    #eval_intra_window_dataset = create_eval_intra_window_dataset(opt)
 
     # Setup Model
 
@@ -707,7 +805,8 @@ def create_eval_intra_window_dataset(opt):
         is_eval=True,
         ret_eval=opt.ret_eval,
         comb_ret_eval=opt.comb_ret_eval,
-        input_fps_reduction=opt.input_fps_reduction
+        input_fps_reduction=opt.input_fps_reduction, 
+        online_loader=opt.online_loader, 
     )
     eval_intra_window_dataset = StartEndDataset(**dataset_config)
     return eval_intra_window_dataset

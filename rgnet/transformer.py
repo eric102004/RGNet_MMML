@@ -108,6 +108,7 @@ class Transformer(nn.Module):
         if self.dabdetr:
             refpoint_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)  # (#queries, batch_size, d)
             tgt = torch.zeros(refpoint_embed.shape[0], bs, d).cuda()
+            #tgt = torch.zeros(100, bs, d).cuda()              # chyijiunn: change from 5 to 100
         else:
             query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)  # (#queries, batch_size, d)
             tgt = torch.zeros_like(query_embed)

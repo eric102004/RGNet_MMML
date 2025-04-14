@@ -29,7 +29,7 @@ def display_window_results(results, topK, title=None):
 
 
 def windows_selection(
-        query_id2windowidx, ground_truth, topK, opt=None, match_number=True,
+        query_id2windowidx, ground_truth, topK, opt=None, match_number=False,
 ):
     pred_qids = set(query_id2windowidx.keys())
     gt_qids = set([e["query_id"] for e in ground_truth])
