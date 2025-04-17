@@ -717,3 +717,7 @@ def build_model(args):
     )
     criterion.to(device)
     return model, criterion
+
+
+if __name__ == "__main__":
+    model = build_model()

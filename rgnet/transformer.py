@@ -8,15 +8,19 @@ Copy-paste from torch.nn.Transformer with modifications:
     * decoder returns a stack of activations from all decoding layers
 """
 import copy
+import os
+import sys
 from typing import Optional
 
 import math
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
-from .dab_attention import MultiheadAttention
-from rgnet.gumble_softmax import GumbelSoftmax
 
+sys.path.append(os.path.dirname(os.path.abspath(__file__)) + '/..')
+from rgnet.dab_attention import MultiheadAttention
+from rgnet.gumble_softmax import GumbelSoftmax
+from rgnet.mamba_minimal import *
 
 class Transformer(nn.Module):
     def __init__(self, d_model=512, nhead=8, num_encoder_layers=2,
@@ -47,11 +51,15 @@ class Transformer(nn.Module):
         if self.gumbel or self.gumbel_3:
             self.gumble_gate = GumbelSoftmax(eps=gumbel_eps)
         # TransformerEncoderLayerThin
-        encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
-                                                dropout, activation, normalize_before)
-        encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
-        self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
+        # encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
+        #                                         dropout, activation, normalize_before)
+        # encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
+        # self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
 
+        args = ModelArgs(d_model=d_model, n_layer=num_encoder_layers, vocab_size=192837465)
+        # encoder_layer = MambaBlock(args)
+        self.encoder = nn.Sequential(*[MambaBlock(args) for _ in range(num_encoder_layers)])
+        
         # TransformerDecoderLayerThin
         #decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,dropout, activation, normalize_before)
         decoder_norm = nn.LayerNorm(d_model)
@@ -111,6 +119,7 @@ class Transformer(nn.Module):
         else:
             query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)  # (#queries, batch_size, d)
             tgt = torch.zeros_like(query_embed)
+        pred_prop_soft = None
         pred_prop_hard = None
         if self.qddetr:
             src_text, mask_text, pos_embed_text = src[video_length + 1:], mask[:, video_length + 1:], pos_embed[video_length + 1:]
@@ -124,7 +133,8 @@ class Transformer(nn.Module):
             if self.gumbel:# and not self.gumbel_3:
                 attn_mask, mask_idx, pred_prop_soft, pred_prop_hard = self.method_gumbel(bs, src, video_length)
 
-            memory, attn_weights = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, mask=attn_mask)  # (L, batch_size, d)
+            # memory, attn_weights = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, mask=attn_mask)  # (L, batch_size, d)
+            memory = self.encoder(src)
             memory_global, memory_video = memory[0], memory[1:]
             mask_video = mask[:, 1:]
             pos_embed_video = pos_embed[1:]
@@ -133,7 +143,8 @@ class Transformer(nn.Module):
             attn_mask = None
             if self.gumbel and not self.gumbel_3:
                 attn_mask, mask_idx, pred_prop_soft, pred_prop_hard = self.method_gumbel(bs, src, video_length)
-            memory, attn_weights = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, mask=attn_mask)  # (L, batch_size, d)
+            # memory, attn_weights = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, mask=attn_mask)  # (L, batch_size, d)
+            memory = self.encoder(src)
             memory_global = None
             memory_video = memory
             mask_video = mask
@@ -183,7 +194,8 @@ class Transformer(nn.Module):
             memory_video = ori_video
         memory_local = memory_video.transpose(0, 1)  # (batch_size, L, d)
 
-        return hs, memory_local, prob_soft, memory_global, pred_prop_soft if self.gumbel else attn_weights, pred_prop_hard, references
+        # return hs, memory_local, prob_soft, memory_global, pred_prop_soft if self.gumbel else attn_weights, pred_prop_hard, references
+        return hs, memory_local, prob_soft, memory_global, pred_prop_soft
 
     def method_gumbel(self, bs, src, video_length):
         pred_prop_hard, pred_prop_soft = self.gumble_gate(self.prop_instance(src))
@@ -1056,3 +1068,9 @@ def _get_activation_fn(activation):
     if activation == "prelu":
         return nn.PReLU()
     raise RuntimeError(F"activation should be relu/gelu, not {activation}.")
+
+
+if __name__ == "__main__":
+    model = Transformer(qddetr=True, gumbel_3=True)
+    x = torch.randn(2, 32, 512)
+    print(model.forward(x, torch.ones(2, 32), torch.ones(5, 512), x, 32))
