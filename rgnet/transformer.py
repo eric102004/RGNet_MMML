@@ -21,6 +21,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)) + '/..')
 from rgnet.dab_attention import MultiheadAttention
 from rgnet.gumble_softmax import GumbelSoftmax
 from rgnet.mamba_minimal import *
+from rgnet.mixture_of_mamba import MixtureOfMamba, MomArgs
 
 class Transformer(nn.Module):
     def __init__(self, d_model=512, nhead=8, num_encoder_layers=2,
@@ -39,8 +40,9 @@ class Transformer(nn.Module):
         self.dabdetr=dabdetr
         self.gumbel_single_proj=gumbel_single_proj
         if qddetr:
-            t2v_encoder_layer = T2V_TransformerEncoderLayer(d_model, nhead, dim_feedforward,
-                                                            dropout, activation, normalize_before)
+            #t2v_encoder_layer = T2V_TransformerEncoderLayer(d_model, nhead, dim_feedforward,
+            #                                                dropout, activation, normalize_before)
+            t2v_encoder_layer = T2V_MambaEncoderLayer(d_model)
             encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
             self.t2v_encoder = TransformerEncoder(t2v_encoder_layer, num_encoder_layers, encoder_norm)
         if self.gumbel:
@@ -489,6 +491,51 @@ class T2V_TransformerEncoderLayer(nn.Module):
         # For tvsum, add kwargs
         return self.forward_post(src, src_mask, src_key_padding_mask, pos, **kwargs)
 
+class T2V_MambaEncoderLayer(nn.Module):
+
+    def __init__(self, d_model, *args, **kwargs):
+        super().__init__()
+        # mamba initialization
+        args = MomArgs(2)
+        self.mambablock = MixtureOfMamba(args, d_model)
+
+    def forward(self,
+                src,
+                video_length=None, 
+                **kwargs):
+        # mamba forward with different projections
+        assert video_length is not None
+
+        # remove global token from src
+        global_token, mamba_input = src[0].unsqueeze(0), src[1:]
+        src_text = src[video_length + 1:]
+        
+        # make modality_masks
+        mamba_input = mamba_input.permute(1, 0, 2)  # (batch_size, L, d)
+        b, l, d = mamba_input.shape
+        modality_mask_video = torch.zeros([b, l], dtype=torch.bool).to(mamba_input.device)
+        modality_mask_video[:, :video_length] = True
+        modality_mask_video = modality_mask_video.reshape(-1)
+        modality_mask_text = torch.zeros([b, l], dtype=torch.bool).to(mamba_input.device)
+        modality_mask_text[:, video_length:] = True
+        modality_mask_text = modality_mask_text.reshape(-1)
+        modality_masks = [
+            modality_mask_video, 
+            modality_mask_text, 
+        ]
+
+        # mamba forward
+        mamba_output = self.mambablock(mamba_input, modality_masks=modality_masks)
+        mamba_output = mamba_output.permute(1, 0, 2)  # (L, batch_size, d)
+
+        # pick only the video part from the mamba output
+        mamba_output = mamba_output[:video_length]
+
+        # concat global token, mamba output, src_text
+        src = torch.cat([global_token, mamba_output], dim=0)
+        src = torch.cat([src, src_text], dim=0)
+        
+        return src
 
 class TransformerEncoderLayer(nn.Module):
 
@@ -1068,6 +1115,8 @@ def _get_activation_fn(activation):
     if activation == "prelu":
         return nn.PReLU()
     raise RuntimeError(F"activation should be relu/gelu, not {activation}.")
+
+
 
 
 if __name__ == "__main__":
