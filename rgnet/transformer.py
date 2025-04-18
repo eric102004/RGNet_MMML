@@ -20,8 +20,6 @@ from torch import nn, Tensor
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + '/..')
 from rgnet.dab_attention import MultiheadAttention
 from rgnet.gumble_softmax import GumbelSoftmax
-from rgnet.mamba_minimal import *
-from rgnet.mixture_of_mamba import MixtureOfMamba, MomArgs
 
 class Transformer(nn.Module):
     def __init__(self, d_model=512, nhead=8, num_encoder_layers=2,
@@ -30,7 +28,8 @@ class Transformer(nn.Module):
                  return_intermediate_dec=False,decoder_gating=False,
                  qddetr=False,query_dim=2,keep_query_pos=True, query_scale_type='cond_elewise',
                  num_patterns=0,modulate_t_attn=True,bbox_embed_diff_each_layer=True,dabdetr=False,gumbel=False,gumbel_2=False,
-                 gumbel_3=False,multiscale=False,gumbel_eps=0.66667,position_embedding=None,gumbel_single_proj=False):
+                 gumbel_3=False,multiscale=False,gumbel_eps=0.66667,position_embedding=None,gumbel_single_proj=False, 
+                 use_t2v_mamba_encoder=False, use_memba_encoder=False, use_mamba_decoder=False):
         super().__init__()
         self.gumbel=gumbel
         self.gumbel_2 = gumbel_2
@@ -40,9 +39,13 @@ class Transformer(nn.Module):
         self.dabdetr=dabdetr
         self.gumbel_single_proj=gumbel_single_proj
         if qddetr:
-            #t2v_encoder_layer = T2V_TransformerEncoderLayer(d_model, nhead, dim_feedforward,
-            #                                                dropout, activation, normalize_before)
-            t2v_encoder_layer = T2V_MambaEncoderLayer(d_model)
+            if use_t2v_mamba_encoder:
+                from rgnet.mixture_of_mamba import MixtureOfMamba, MomArgs
+                t2v_encoder_layer = T2V_MambaEncoderLayer(d_model)
+            else:
+                t2v_encoder_layer = T2V_TransformerEncoderLayer(d_model, nhead, dim_feedforward,
+                                                                dropout, activation, normalize_before)
+            
             encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
             self.t2v_encoder = TransformerEncoder(t2v_encoder_layer, num_encoder_layers, encoder_norm)
         if self.gumbel:
@@ -52,15 +55,17 @@ class Transformer(nn.Module):
             self.prop_instance2 = nn.Linear(d_model, 1)
         if self.gumbel or self.gumbel_3:
             self.gumble_gate = GumbelSoftmax(eps=gumbel_eps)
-        # TransformerEncoderLayerThin
-        # encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
-        #                                         dropout, activation, normalize_before)
-        # encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
-        # self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
 
-        args = ModelArgs(d_model=d_model, n_layer=num_encoder_layers, vocab_size=192837465)
-        # encoder_layer = MambaBlock(args)
-        self.encoder = nn.Sequential(*[MambaBlock(args) for _ in range(num_encoder_layers)])
+        if use_mamba_encoder:
+            from rgnet.mamba_minimal import ModelArgs, ResidualBlock
+            args = ModelArgs(d_model=d_model, n_layer=num_encoder_layers, vocab_size=192837465)
+            self.encoder = nn.Sequential(*[ResidualBlock(args) for _ in range(num_encoder_layers)])
+        else:
+            # TransformerEncoderLayerThin
+            encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
+                                                    dropout, activation, normalize_before)
+            encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
+            self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
         
         # TransformerDecoderLayerThin
         #decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,dropout, activation, normalize_before)
@@ -1100,7 +1105,10 @@ def build_transformer(args, position_embedding):
         gumbel_eps=args.gumbel_eps,
         multiscale=args.multiscale,
         position_embedding=position_embedding,
-        gumbel_single_proj=args.gumbel_single_proj
+        gumbel_single_proj=args.gumbel_single_proj, 
+        use_t2v_mamba_encoder=args.use_t2v_mamba_encoder,
+        use_mamba_encoder=args.use_mamba_encoder,
+        use_mamba_decoder=args.use_mamba_decoder,
     )
 
 

@@ -32,7 +32,7 @@ start_epoch_for_adapter=-1
 topk_window=20
 dset_name=ego4d
 retrieval_loss_coef=0
-resume=naq_pretrained_e0099/naq_pretrained_e0099.ckpt #pretrain_ego4d/model_e0099.ckpt
+#resume=naq_pretrained_e0099/naq_pretrained_e0099.ckpt #pretrain_ego4d/model_e0099.ckpt
 lr=.00001
 adapter_module=none
 exp_id=finetune_ego4d
@@ -66,7 +66,6 @@ CUDA_VISIBLE_DEVICES=${device_id} PYTHONPATH=$PYTHONPATH:. python rgnet/train.py
     --qddetr \
     --retrieval_loss_coef ${retrieval_loss_coef} \
     --start_epoch 0 \
-    --resume ${resume} \
     --lr ${lr} \
     --ret_eval \
     --gumbel_eps 0.3 \
@@ -79,3 +78,5 @@ CUDA_VISIBLE_DEVICES=${device_id} PYTHONPATH=$PYTHONPATH:. python rgnet/train.py
     --gumbel_single_proj \
     --no_adapter_loss \
     ${@:6}
+
+#    --resume ${resume} \

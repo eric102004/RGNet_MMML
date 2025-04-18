@@ -193,6 +193,10 @@ class BaseOptions(object):
         parser.add_argument("--pos_temperature", type=int, default=10000)
         parser.add_argument("--topk", type=int, default=10)
         parser.add_argument("--topk_span", type=int, default=5)
+        # mamba
+        parser.add_argument("--use_t2v_mamba_encoder", action="store_true", help="use T2V_MambaEncoder or not. If false, it will use default T2V_TransformerEncoder")
+        parser.add_argument("--use_mamba_encoder", action="store_true", help="use MambaEncoder or not. If false, it will use default TransformerEncoder")
+        parser.add_argument("--use_mamba_decoder", action="store_true", help="use MambaDecoder or not. If false, it will use default TransformerDecoder")
         self.parser = parser
 
     def display_save(self, opt):
