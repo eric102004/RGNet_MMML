@@ -64,6 +64,7 @@ def extract_ego4d_text_feature(args):
     #format = "data/ego4d_nlq_data_for_cone/data/ego4d_naq_data/%s.jsonl"
     format = "data/ego4d_nlq_data_for_cone/data/ego4d_data/%s.jsonl"
     feature_output_path ='data/ego4d_nlq_data_for_cone/offline_lmdb/clip_naq_token'
+    os.makedirs(feature_output_path, exist_ok=True)
     split_list = ['train', 'test', 'val']
     total_data = []
     for split in split_list:

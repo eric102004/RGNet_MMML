@@ -8,6 +8,7 @@ from collections import defaultdict
 import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from rgnet.config import BaseOptions
@@ -101,7 +102,82 @@ def train_epoch(model, criterion, train_loader, optimizer, opt, epoch_i, tb_writ
             n_outputs = None
 
         if opt.neg_loss:
-            neg_outputs = model.forward(**neg_model_inputs_tuple[0])
+            bsz = pos_model_inputs["src_txt"].size(0)
+            hard_neg_inputs = {  # we will build tensors and cat at the end
+                "src_txt"            : [],
+                "src_txt_mask"       : [],
+                "src_vid_motion"     : [],
+                "src_vid_motion_mask": []
+            }
+
+            all_score_nan = True
+            for i in range(bsz):                       # loop over samples
+                cand_feats = batch[1]["neg_windows_motion_feat"][i]  # list of tensors
+                best_score = -1e9
+                best_feat  = None
+                score_nan = True
+                for neg_feat in cand_feats:            # loop over candidate windows
+                    tmp_neg_inp = {
+                        "src_txt"         : pos_model_inputs["src_txt"][i:i+1],
+                        "src_txt_mask"    : pos_model_inputs["src_txt_mask"][i:i+1],
+                        "src_vid_motion"  : neg_feat[None].to(opt.device),   # add batch‑dim
+                        "src_vid_motion_mask":
+                            torch.zeros((1, len(neg_feat)),
+                                        dtype=torch.bool,
+                                        device=opt.device)
+                    }
+                    with torch.no_grad():
+                        n_out = model.forward(**tmp_neg_inp)
+                        print(n_out["prob_soft"].item())
+                        if torch.isnan(n_out.get("prob_soft")): # TODO: Why the score gives NaN?
+                            continue
+                        else:                                             # fallback or NaN case
+                            score_nan = False
+                            score = n_out["prob_soft"].item()
+                    if score > best_score:
+                        best_score, best_feat = score, neg_feat
+                    # print(torch.isnan(n_out.get("prob_soft")), best_score, best_feat)
+                # print("best_score", best_score, "best_feat", best_feat)
+                all_score_nan = all_score_nan and score_nan 
+                if score_nan:
+                    # print("All scores are NaN. Skip the negative loss.")
+                    continue
+                # store the hardest window for this sample
+                hard_neg_inputs["src_txt"].append(pos_model_inputs["src_txt"][i:i+1])
+                hard_neg_inputs["src_txt_mask"].append(pos_model_inputs["src_txt_mask"][i:i+1])
+                hard_neg_inputs["src_vid_motion"].append(best_feat[None].to(opt.device))
+                hard_neg_inputs["src_vid_motion_mask"].append(
+                    torch.zeros((1, len(best_feat)),
+                                dtype=torch.bool,
+                                device=opt.device))
+            if all_score_nan:
+                print("All scores are NaN. Skip!!!!!!!!!!!!!!")
+                continue
+            # cat lists into proper batched tensors
+            max_len = max(t.shape[1] for t in hard_neg_inputs["src_vid_motion"])
+
+            padded_motion = []
+            padded_mask   = []
+            for feat, mask in zip(hard_neg_inputs["src_vid_motion"],
+                                hard_neg_inputs["src_vid_motion_mask"]):
+
+                L = feat.shape[1]
+                if L < max_len:
+                    pad_amt = (0, 0,           # no pad on feature‑dim
+                            0, max_len - L) # pad on sequence‑dim (right side)
+                    feat = F.pad(feat, pad_amt, value=0.0)
+                    mask = F.pad(mask, (0, max_len - L), value=True)  # True = padding
+                padded_motion.append(feat)
+                padded_mask.append(mask)
+
+            hard_neg_inputs["src_vid_motion"]      = torch.cat(padded_motion, dim=0)
+            hard_neg_inputs["src_vid_motion_mask"] = torch.cat(padded_mask,   dim=0)
+
+            # text tensors are already same length, safe to cat as before
+            hard_neg_inputs["src_txt"]       = torch.cat(hard_neg_inputs["src_txt"], dim=0)
+            hard_neg_inputs["src_txt_mask"]  = torch.cat(hard_neg_inputs["src_txt_mask"], dim=0)
+
+            neg_outputs = model.forward(**hard_neg_inputs)   # gradient flows here
             loss_dict = criterion(pos_outputs, targets, neg_outputs, n_outputs)
         else:
             loss_dict = criterion(pos_outputs, targets, None, n_outputs)

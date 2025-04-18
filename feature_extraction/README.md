@@ -17,6 +17,11 @@ We also provide the code to extract the token feature by CLIP or RoBERTa.
 python ego4d_clip_token_extractor.py 
 ```
 
+Download EgoVLP_PT_BEST (`egovlp.pth`) from https://github.com/showlab/EgoVLP?tab=readme-ov-file and put it to `data/ego4d_naq`. Then run the following command.
+```
+python ego4d_clip_cls_extractor.py 
+```
+
 Then merge the textual query and token feature into a single LMDB file.
 
 ```

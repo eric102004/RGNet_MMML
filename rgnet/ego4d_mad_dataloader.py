@@ -259,15 +259,17 @@ class StartEndDataset(Dataset):
             tmp_model_inputs.update({"saliency_pos_labels": random.sample(rel_clip_ids, k=1)})
             tmp_model_inputs.update({"saliency_neg_labels": random.sample(easy_neg_pool, k=1)})
 
-            # Randomly choose one negative window
-            neg_window_id = random.choice(neg_window_pool)
-            #neg_index = random.choice(list(self.q2q_list[index]))
-            neg_start = max((neg_window_id - 1) * self.slide_window_size, 0)
-            neg_end = min((neg_window_id - 1) * self.slide_window_size + self.max_v_l, ctx_l)
-            tmp_model_inputs.update(
-                {"neg_window_motion_feat": video_motion_feat[neg_start:neg_end, :]})
+            neg_windows_feat = []          # collect motion features for each candidate
+            neg_clip_feat = []            # collect appearance features for each candidate
+            for w in neg_window_pool:
+                s = max((w-1)*self.slide_window_size, 0)
+                e = min((w-1)*self.slide_window_size+self.max_v_l, ctx_l)
+                neg_windows_feat.append(video_motion_feat[s:e , :])
+                neg_clip_feat.append(video_clip_feat[s:e, :])
+            # store the whole list
+            tmp_model_inputs.update({"neg_windows_motion_feat": neg_windows_feat})
             tmp_model_clip_inputs.update(
-                {"neg_window_appear_feat": video_clip_feat[neg_start:neg_end, :]})
+                {"neg_window_appear_feat": neg_windows_feat})
 
             model_clip_inputs.append(tmp_model_clip_inputs)
             model_inputs.append(tmp_model_inputs)
@@ -370,6 +372,12 @@ def start_end_collate(batch):
         if k in ["video_start", "video_length"]:
             batched_data[k] = torch.IntTensor([item[k] for e in batch for item in e['model_inputs']])
             continue
+        if k == "neg_windows_motion_feat":
+            # keep the Python list‑of‑tensors as is
+            batched_data[k] = [item[k]                               # ❶
+                            for e in batch
+                            for item in e['model_inputs']]
+            continue
 
         seq = [item[k] for e in batch for item in e['model_inputs']]
         batched_data[k] = pad_sequences_1d(
@@ -384,6 +392,11 @@ def start_end_collate(batch):
         if k in ["query_cls_feat"]:
             #batched_clip_data[k] = torch.FloatTensor([item[k] for e in batch for item in e['model_clip_inputs']])
             batched_clip_data[k] = torch.from_numpy(np.array([item[k] for e in batch for item in e['model_clip_inputs']]))
+            continue
+        if k in ["neg_window_appear_feat"]:      # add any similar key names here
+            batched_clip_data[k] = [item[k]
+                                    for e in batch
+                                    for item in e['model_clip_inputs']]
             continue
         seq = [item[k] for e in batch for item in e['model_clip_inputs']]
         batched_clip_data[k] = pad_sequences_1d(
