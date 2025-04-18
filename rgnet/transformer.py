@@ -29,7 +29,7 @@ class Transformer(nn.Module):
                  qddetr=False,query_dim=2,keep_query_pos=True, query_scale_type='cond_elewise',
                  num_patterns=0,modulate_t_attn=True,bbox_embed_diff_each_layer=True,dabdetr=False,gumbel=False,gumbel_2=False,
                  gumbel_3=False,multiscale=False,gumbel_eps=0.66667,position_embedding=None,gumbel_single_proj=False, 
-                 use_t2v_mamba_encoder=False, use_memba_encoder=False, use_mamba_decoder=False):
+                 use_t2v_mamba_encoder=False, use_mamba_encoder=False, use_mamba_decoder=False):
         super().__init__()
         self.gumbel=gumbel
         self.gumbel_2 = gumbel_2
