@@ -75,20 +75,26 @@ class Transformer(nn.Module):
         # TransformerDecoderLayerThin
         #decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,dropout, activation, normalize_before)
         decoder_norm = nn.LayerNorm(d_model)
-        if self.dabdetr:
-            decoder_layer = DabTransformerDecoderLayer(d_model, nhead, dim_feedforward,dropout, activation,
-                                                       normalize_before,keep_query_pos=keep_query_pos)
-            self.decoder = DabTransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm,
-                                              return_intermediate=return_intermediate_dec,
-                                              d_model=d_model, query_dim=query_dim, keep_query_pos=keep_query_pos,
-                                              query_scale_type=query_scale_type,
-                                              modulate_t_attn=modulate_t_attn,
-                                              bbox_embed_diff_each_layer=bbox_embed_diff_each_layer)
-        else:
-            decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
-                                                    normalize_before)
+        if self.use_mamba_decoder:
+            decoder_layer = MambaDecoderLayer(d_model)
+            decoder_norm = None
             self.decoder = TransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm,
                                           return_intermediate=return_intermediate_dec)
+        else:
+            if self.dabdetr:
+                decoder_layer = DabTransformerDecoderLayer(d_model, nhead, dim_feedforward,dropout, activation,
+                                                        normalize_before,keep_query_pos=keep_query_pos)
+                self.decoder = DabTransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm,
+                                                return_intermediate=return_intermediate_dec,
+                                                d_model=d_model, query_dim=query_dim, keep_query_pos=keep_query_pos,
+                                                query_scale_type=query_scale_type,
+                                                modulate_t_attn=modulate_t_attn,
+                                                bbox_embed_diff_each_layer=bbox_embed_diff_each_layer)
+            else:
+                decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
+                                                        normalize_before)
+                self.decoder = TransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm,
+                                            return_intermediate=return_intermediate_dec)
 
 
         self._reset_parameters()
@@ -98,8 +104,12 @@ class Transformer(nn.Module):
         self.decoder_gating=decoder_gating
         if decoder_gating:
             #self.mask_c = Mask_c()
-            decoder_layer2 = TransformerDecoderLayer(d_model, nhead, dim_feedforward,dropout, activation, normalize_before)
-            decoder_norm2 = nn.LayerNorm(d_model)
+            if self.use_mamba_decoder:
+                decoder_layer = MambaDecoderLayer(d_model)
+                decoder_norm2 = None
+            else:
+                decoder_layer2 = TransformerDecoderLayer(d_model, nhead, dim_feedforward,dropout, activation, normalize_before)
+                decoder_norm2 = nn.LayerNorm(d_model)
             self.decoder2 = TransformerDecoder(decoder_layer2, num_decoder_layers_2, decoder_norm2,return_intermediate=return_intermediate_dec)
         if self.multiscale:
             num_feature_levels = 4
@@ -341,7 +351,10 @@ class TransformerDecoder(nn.Module):
                            memory_key_padding_mask=memory_key_padding_mask,
                            pos=pos, query_pos=query_pos)
             if self.return_intermediate:
-                intermediate.append(self.norm(output))
+                if self.norm is not None:
+                    intermediate.append(self.norm(output))
+                else:
+                    intermediate.append(output)
 
         if self.norm is not None:
             output = self.norm(output)
@@ -563,7 +576,8 @@ class T2V_MambaEncoderLayer(nn.Module):
         mamba_output = mamba_output_forward + mamba_output_backward
 
         # linear, add and norm
-        mamba_output = self.norm(self.linear(mamba_output) + mamba_output)
+        mamba_output_v = self.norm(self.linear(mamba_output[:video_length]))
+        mamba_output = torch.cat([mamba_output_v, mamba_output[video_length:]], dim=0)
 
         mamba_output = mamba_output.permute(1, 0, 2)  # (L, batch_size, d)
 
@@ -1152,6 +1166,69 @@ class DabTransformerDecoderLayer(nn.Module):
         tgt = tgt + self.dropout3(tgt2)
         tgt = self.norm3(tgt)
         return tgt
+
+class MambaDecoderLayer(nn.Module):
+
+    def __init__(self, d_model, *args, **kwargs):
+        super().__init__()
+        # Decoder mamba
+        self.mamba = MambaEncoderLayer(d_model)
+
+        # Decoder mixture of mamba
+        from rgnet.mixture_of_mamba import MixtureOfMamba, MomArgs
+        from mamba_ssm.ops.triton.layernorm import RMSNorm
+        args = MomArgs(2, do_not_split_in_proj=False, do_not_split_x_proj=False, do_not_split_dt_proj=False, do_not_split_out_proj=False)
+        self.mixture_of_mamba_forward = MixtureOfMamba(args, d_model)
+        self.mixture_of_mamba_backward = MixtureOfMamba(args, d_model)
+        self.linear = nn.Linear(d_model, d_model)
+        self.norm = RMSNorm(d_model)
+
+    def forward(self, tgt, memory, *args, **kwargs):
+
+        # ========== Begin of Self-Attention (mamba alternative) =============
+        tgt = self.mamba(tgt)
+
+        # ========== Begin of Cross-Attention =============
+        tgt_length = tgt.shape[0]
+        # concatenate tgt and memory along length axis
+        #print(tgt.shape, memory.shape)
+        mamba_input = torch.cat([tgt, memory], dim=0)  # (L, batch_size, d)
+
+        # make forward and backward modality masks
+        mamba_input = mamba_input.permute(1, 0, 2)  # (batch_size, L, d)
+        b, l, d = mamba_input.shape
+        modality_mask_tgt = torch.zeros([b, l], dtype=torch.bool).to(mamba_input.device)
+        modality_mask_tgt[:, :tgt_length] = True
+        modality_mask_video = torch.zeros([b, l], dtype=torch.bool).to(mamba_input.device)
+        modality_mask_video[:, tgt_length:] = True
+        modality_mask_tgt_forward = modality_mask_tgt.reshape(-1)
+        modality_mask_video_forward = modality_mask_video.reshape(-1)
+        modality_masks_forward = [
+            modality_mask_tgt_forward, 
+            modality_mask_video_forward, 
+        ]
+        modality_mask_tgt_backward = modality_mask_tgt.flip([1]).reshape(-1)
+        modality_mask_video_backward = modality_mask_video.flip([1]).reshape(-1)
+        modality_masks_backward = [
+            modality_mask_tgt_backward, 
+            modality_mask_video_backward, 
+        ]
+
+        # mamba forward
+        mamba_output_forward = self.mixture_of_mamba_forward(mamba_input, modality_masks=modality_masks_forward)
+        # mamba backward
+        mamba_input_backward = mamba_input.flip([1])
+        mamba_output_backward = self.mixture_of_mamba_backward(mamba_input_backward, modality_masks=modality_masks_backward)
+        mamba_output_backward = mamba_output_backward.flip([1])
+
+        mamba_output = mamba_output_forward + mamba_output_backward
+
+        # apply linear, add and norm on only tgt part
+        mamba_output_tgt = self.norm(self.linear(mamba_output[:,:tgt_length]))
+        mamba_output_tgt = mamba_output_tgt.permute(1, 0, 2)  # (L, batch_size, d)
+        #print("output shape", mamba_output_tgt.shape)
+        
+        return mamba_output_tgt
 
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])

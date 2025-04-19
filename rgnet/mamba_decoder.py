@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from RGNet_MMML.rgnet.mamba_minimal import ModelArgs, ResidualBlock, RMSNorm
+from rgnet.mamba_minimal import ModelArgs, ResidualBlock, RMSNorm
 
 class MambaDecoderWrapper(nn.Module):
     """
