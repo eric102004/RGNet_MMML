@@ -38,9 +38,11 @@ class Transformer(nn.Module):
         self.qddetr= qddetr
         self.dabdetr=dabdetr
         self.gumbel_single_proj=gumbel_single_proj
+        self.use_t2v_mamba_encoder=use_t2v_mamba_encoder
+        self.use_mamba_encoder=use_mamba_encoder
+        self.use_mamba_decoder=use_mamba_decoder
         if qddetr:
             if use_t2v_mamba_encoder:
-                from rgnet.mixture_of_mamba import MixtureOfMamba, MomArgs
                 t2v_encoder_layer = T2V_MambaEncoderLayer(d_model)
             else:
                 t2v_encoder_layer = T2V_TransformerEncoderLayer(d_model, nhead, dim_feedforward,
@@ -57,9 +59,12 @@ class Transformer(nn.Module):
             self.gumble_gate = GumbelSoftmax(eps=gumbel_eps)
 
         if use_mamba_encoder:
-            from rgnet.mamba_minimal import ModelArgs, ResidualBlock
-            args = ModelArgs(d_model=d_model, n_layer=num_encoder_layers, vocab_size=192837465)
-            self.encoder = nn.Sequential(*[ResidualBlock(args) for _ in range(num_encoder_layers)])
+            #from rgnet.mamba_minimal import ModelArgs, ResidualBlock
+            #args = ModelArgs(d_model=d_model, n_layer=num_encoder_layers, vocab_size=192837465)
+            #self.encoder = nn.Sequential(*[ResidualBlock(args) for _ in range(num_encoder_layers)])
+            encoder_layer = MambaEncoderLayer(d_model)
+            encoder_norm = None
+            self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
         else:
             # TransformerEncoderLayerThin
             encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
@@ -140,8 +145,11 @@ class Transformer(nn.Module):
             if self.gumbel:# and not self.gumbel_3:
                 attn_mask, mask_idx, pred_prop_soft, pred_prop_hard = self.method_gumbel(bs, src, video_length)
 
-            # memory, attn_weights = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, mask=attn_mask)  # (L, batch_size, d)
-            memory = self.encoder(src)
+            if self.use_mamba_encoder:
+                memory = self.encoder(src)
+            else:
+                memory, attn_weights = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, mask=attn_mask)  # (L, batch_size, d)
+            
             memory_global, memory_video = memory[0], memory[1:]
             mask_video = mask[:, 1:]
             pos_embed_video = pos_embed[1:]
@@ -150,8 +158,10 @@ class Transformer(nn.Module):
             attn_mask = None
             if self.gumbel and not self.gumbel_3:
                 attn_mask, mask_idx, pred_prop_soft, pred_prop_hard = self.method_gumbel(bs, src, video_length)
-            # memory, attn_weights = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, mask=attn_mask)  # (L, batch_size, d)
-            memory = self.encoder(src)
+            if self.use_mamba_encoder:
+                memory = self.encoder(src)
+            else:
+                memory, attn_weights = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, mask=attn_mask)  # (L, batch_size, d)
             memory_global = None
             memory_video = memory
             mask_video = mask
@@ -201,8 +211,10 @@ class Transformer(nn.Module):
             memory_video = ori_video
         memory_local = memory_video.transpose(0, 1)  # (batch_size, L, d)
 
-        # return hs, memory_local, prob_soft, memory_global, pred_prop_soft if self.gumbel else attn_weights, pred_prop_hard, references
-        return hs, memory_local, prob_soft, memory_global, pred_prop_soft
+        if self.use_mamba_encoder:
+            return hs, memory_local, prob_soft, memory_global, pred_prop_soft, pred_prop_hard, references
+        else:
+            return hs, memory_local, prob_soft, memory_global, pred_prop_soft if self.gumbel else attn_weights, pred_prop_hard, references
 
     def method_gumbel(self, bs, src, video_length):
         pred_prop_hard, pred_prop_soft = self.gumble_gate(self.prop_instance(src))
@@ -501,8 +513,13 @@ class T2V_MambaEncoderLayer(nn.Module):
     def __init__(self, d_model, *args, **kwargs):
         super().__init__()
         # mamba initialization
-        args = MomArgs(2)
-        self.mambablock = MixtureOfMamba(args, d_model)
+        from rgnet.mixture_of_mamba import MixtureOfMamba, MomArgs
+        from mamba_ssm.ops.triton.layernorm import RMSNorm
+        args = MomArgs(2, do_not_split_in_proj=False, do_not_split_x_proj=False, do_not_split_dt_proj=False, do_not_split_out_proj=False)
+        self.mambablock_forward = MixtureOfMamba(args, d_model)
+        self.mambablock_backward = MixtureOfMamba(args, d_model)
+        self.linear = nn.Linear(d_model, d_model)
+        self.norm = RMSNorm(d_model)
 
     def forward(self,
                 src,
@@ -520,17 +537,34 @@ class T2V_MambaEncoderLayer(nn.Module):
         b, l, d = mamba_input.shape
         modality_mask_video = torch.zeros([b, l], dtype=torch.bool).to(mamba_input.device)
         modality_mask_video[:, :video_length] = True
-        modality_mask_video = modality_mask_video.reshape(-1)
         modality_mask_text = torch.zeros([b, l], dtype=torch.bool).to(mamba_input.device)
         modality_mask_text[:, video_length:] = True
-        modality_mask_text = modality_mask_text.reshape(-1)
-        modality_masks = [
-            modality_mask_video, 
-            modality_mask_text, 
+        modality_mask_video_forward = modality_mask_video.reshape(-1)
+        modality_mask_text_forward = modality_mask_text.reshape(-1)
+        modality_masks_forward = [
+            modality_mask_video_forward, 
+            modality_mask_text_forward, 
+        ]
+        modality_mask_video_backward = modality_mask_video.flip([1]).reshape(-1)
+        modality_mask_text_backward = modality_mask_text.flip([1]).reshape(-1)
+        modality_masks_backward = [
+            modality_mask_video_backward, 
+            modality_mask_text_backward, 
         ]
 
         # mamba forward
-        mamba_output = self.mambablock(mamba_input, modality_masks=modality_masks)
+        mamba_output_forward = self.mambablock_forward(mamba_input, modality_masks=modality_masks_forward)
+
+        # mamba backward
+        mamba_input_backward = mamba_input.flip([1])
+        mamba_output_backward = self.mambablock_backward(mamba_input_backward, modality_masks=modality_masks_backward)
+        mamba_output_backward = mamba_output_backward.flip([1])
+
+        mamba_output = mamba_output_forward + mamba_output_backward
+
+        # linear, add and norm
+        mamba_output = self.norm(self.linear(mamba_output) + mamba_output)
+
         mamba_output = mamba_output.permute(1, 0, 2)  # (L, batch_size, d)
 
         # pick only the video part from the mamba output
@@ -601,6 +635,44 @@ class TransformerEncoderLayer(nn.Module):
             return self.forward_pre(src, src_mask, src_key_padding_mask, pos)
         return self.forward_post(src, src_mask, src_key_padding_mask, pos)
 
+class MambaEncoderLayer(nn.Module):
+
+    def __init__(self, d_model, *args, **kwargs):
+        """
+            from rgnet.mamba_minimal import ModelArgs, ResidualBlock
+            args = ModelArgs(d_model=d_model, n_layer=num_encoder_layers, vocab_size=192837465)
+            self.encoder = nn.Sequential(*[ResidualBlock(args) for _ in range(num_encoder_layers)])
+        """
+        super().__init__()
+        from rgnet.mixture_of_mamba import MixtureOfMamba, MomArgs
+        from mamba_ssm.ops.triton.layernorm import RMSNorm
+        args = MomArgs(1, do_not_split_in_proj=True, do_not_split_x_proj=True, do_not_split_dt_proj=True, do_not_split_out_proj=True)
+        self.mambablock_forward = MixtureOfMamba(args, d_model)
+        self.mambablock_backward = MixtureOfMamba(args, d_model)
+        self.linear = nn.Linear(d_model, d_model)
+        self.norm = RMSNorm(d_model)
+        self.args = args
+
+    def forward(self, src, *args, **kwargs):
+
+        mamba_input = src.permute(1, 0, 2)  # (batch_size, L, d)
+
+        # mamba forward
+        mamba_output_forward = self.mambablock_forward(mamba_input)
+
+        # mamba backward
+        mamba_input_backward = mamba_input.flip([1])
+        mamba_output_backward = self.mambablock_backward(mamba_input_backward)
+        mamba_output_backward = mamba_output_backward.flip([1])
+
+        mamba_output = mamba_output_forward + mamba_output_backward
+
+        # linear, add and norm
+        mamba_output = self.norm(self.linear(mamba_output) + mamba_output)
+
+        mamba_output = mamba_output.permute(1, 0, 2)  # (L, batch_size, d)
+        
+        return mamba_output
 
 class TransformerDecoderLayer(nn.Module):
 

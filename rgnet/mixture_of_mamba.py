@@ -46,12 +46,12 @@ except ImportError:
 #     return modality_masks
 
 class MomArgs:
-    def __init__(self, n_modalities):
+    def __init__(self, n_modalities, do_not_split_in_proj=False, do_not_split_x_proj=False, do_not_split_dt_proj=False, do_not_split_out_proj=False):
         self.n_modalities = n_modalities
-        self.do_not_split_in_proj = False
-        self.do_not_split_x_proj = False
-        self.do_not_split_dt_proj = False
-        self.do_not_split_out_proj = False
+        self.do_not_split_in_proj = do_not_split_in_proj
+        self.do_not_split_x_proj = do_not_split_x_proj
+        self.do_not_split_dt_proj = do_not_split_dt_proj
+        self.do_not_split_out_proj = do_not_split_out_proj
 
 
 class MixtureOfMamba(nn.Module):
@@ -248,6 +248,9 @@ class MixtureOfMamba(nn.Module):
                 for _ in range(self.n_modalities)
             ]
             self.local_experts_out_proj = torch.nn.ModuleList(expert_list)
+        
+        # rmsnorm
+        self.norm = RMSNorm(self.d_model)
 
     def forward(
         self,
@@ -477,7 +480,9 @@ class MixtureOfMamba(nn.Module):
                 out = merged_output
 
                 out = rearrange(out, "(b l) d -> b l d", l=seqlen)
-
+        
+        # add and norm
+        out = self.norm(out + hidden_states)
 
         return out
 
