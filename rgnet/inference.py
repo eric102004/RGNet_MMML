@@ -624,7 +624,8 @@ def setup_model(opt):
     ]
 
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=opt.lr, weight_decay=opt.wd)
-    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, opt.lr_drop)
+    #lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, opt.lr_drop)
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, opt.n_epoch, eta_min=1e-6)
 
     if opt.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[opt.gpu], find_unused_parameters=True)
